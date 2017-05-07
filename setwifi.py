@@ -1,26 +1,35 @@
-def main():
+def setwifi(timeout=35):
     """
     This is ESP8266 micropython script designed to serve ESP8266 as web server to obtain SSID and password
     The script sets up an access point, listens on port 80 and implements following commands:
     'http://<esp8266_ip>'                   - shows web page to enter WiFi info
     """
-        
-    import sys
+
     import gc
+    from setwifi import setup_station
     from time import sleep_ms
     import usocket as socket
-
     import network
     # create access-point interface
     ap_if = network.WLAN(network.AP_IF)
-#    ap_if.config(essid='ESP-AP', authmode=network.AUTH_OPEN)
     ap_if.active(True)
-    sleep_ms(1000)
-    ipcfg = ap_if.ifconfig()
+    # the AP has to be active to be able to configure it
+    try:
+        ap_if.config(authmode=network.AUTH_OPEN)
+    except Exception as e:
+        e_str = str(e)
+        if "can't set AP config" in e_str:
+            print("Ignoring exception: ".format(e_str))
+        else:
+            return e
     port = 80
     cfg_data = {}
     sta_if = network.WLAN(network.STA_IF)
-    
+
+    return_code = None
+    setup_attempts = 0
+
+    # the following constants are defined because the HTML strings need to match the python strings.
     SSID = "SSID"
     PASSWORD = "password"
     SUBMIT_VALUE = "submit_value"
@@ -51,15 +60,15 @@ def main():
         </form>"""
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
     s.bind(('', port))
     s.listen(2)
-    print('\n-- Now Listening on port {}:{}...\n'.format(ipcfg[0], port))
+    print('\n-- Now Listening on: {} {}:{}...\n'.format(ap_if.config('essid'), ap_if.ifconfig()[0], port))
     
     page_title = "Configure WiFi"
-    cancelled_pressed = False
 
     try:
-        while SSID not in cfg_data and not cancelled_pressed:
+        while return_code is None:
             conn, addr = s.accept()
             method = None
             content_length = None
@@ -94,12 +103,12 @@ def main():
                     for i, val in enumerate(post_data.split('&')):
                         (k,v) = val.split('=')
                         cfg_data[k] = v
-                    
+
                     if SUBMIT_VALUE in cfg_data and cfg_data[SUBMIT_VALUE] == CANCEL:
-                        cancelled_pressed = True
                         page_body="WiFi setup cancelled."
                         page_message=""
                         page_form=""
+                        return_code = "cancelled: attempts: " + str(setup_attempts)
                     # could have added javascript validation, but since it can be disabled, its recommended the server do the validation
                     elif SSID not in cfg_data or len(cfg_data[SSID]) < 2 or PASSWORD not in cfg_data or len(cfg_data[PASSWORD]) < 4:
                         if SSID not in cfg_data or len(cfg_data[SSID]) < 2:
@@ -109,9 +118,11 @@ def main():
                         cfg_data = {}
                     else:
                         setup_ok, setup_message = setup_station(cfg_data[SSID], cfg_data[PASSWORD])
+                        setup_attempts += 1
                         if setup_ok:
                             page_body = setup_message
                             page_form = ""
+                            return_code = "done: connected"
                         else:
                             page_message=setup_message
                             cfg_data = {}
@@ -122,10 +133,17 @@ def main():
             gc.collect()
 
     except Exception as e:
-        print ('\n\nException in main loop: {}\n\n'.format(e))
+        e_str = str(e)
+        if 'ETIMEDOUT' in e_str:
+            return_code = "timeout"
+        else:
+            return_code = "exception: ".format(e_str)
 
+    sleep_ms(2000)
     s.close()
-#    ap_if.active(False)
+    sleep_ms(2000)
+    ap_if.active(False)
+    return return_code
 
 
 def setup_station(id, pw):
